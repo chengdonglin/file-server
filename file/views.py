@@ -7,6 +7,7 @@ from django.db import transaction
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.conf import settings
+from django.core.cache import cache
 
 from file.models import File, FileDetail
 from util.JsonResult import JsonResult
@@ -48,7 +49,7 @@ def file_upload(request):
             with open(file=file_path, mode='ab') as fp:
                 for chunk in file.chunks():
                     fp.write(chunk)
-                    fp.close()
+                fp.close()
         except Exception as e:
             print("保存失败", e)
             fp.close()
@@ -58,15 +59,12 @@ def file_upload(request):
                 'msg': '上传失败',
                 'success': False
             })
-        # todo 保存数据库
         file_detail = FileDetail(task_id=task_id, md5=md5, status=1, chunk=chunk_number, path=file_path,
                                  upload_filename=filename, filename=chunk_file_name, chunk_size=size, start=start,
                                  end=end)
         file_detail.save()
-        # todo 采用 redis 分布式锁
         # 任务成功的数量+1
-        task.success_chunk = task.success_chunk + 1
-        task.save()
+        cache.incr(cache_key(task_id))
         return JsonResponse({
             'code': 200,
             'msg': '上传成功',
@@ -134,7 +132,7 @@ def check_file_by_md5(request):
 @transaction.atomic()
 def merge(request):
     """
-    合并文件
+    合并文件 todo 优化，先判断redis的success, 然后在判断数据库的success
     :param request:
     :return:
     """
@@ -149,13 +147,15 @@ def merge(request):
     # 前置条件, 检查是否所有文件均已经上传,防止攻击
     # 找出所有上传成功的分片
     chunks = FileDetail.objects.filter(task_id=file.task_id, status=1)
-    if len(chunks) != file.total_chunk or file.total_chunk != file.success_chunk:
+    print("缓存中的数量", cache.get(cache_key(task_id=task_id)))
+    print("分片数量",len(chunks))
+    if len(chunks) != file.total_chunk or cache.get(cache_key(task_id=task_id)) != file.total_chunk:
         # 说明没有上传完成,返回未上传完成状态,同时把已经上传成功的返回回去
         # return JsonResult.success({
         #     'done': False,
         #     'details': chunks
         # })
-        return JsonResult.fail(400,"分片未全部上传完成,无法发起合并的操作")
+        return JsonResult.fail(400, "分片未全部上传完成,无法发起合并的操作")
     # 第一步,读取所有的文件分片文件
     # 第二步: 组装分片成单个文件
     merge_file_path = get_chunk_info(file.md5, settings.FILE_BELONG.get(file.belong))
@@ -163,8 +163,10 @@ def merge(request):
     # 第三步: 更新Task状态为完成
     file.status = 1
     file.filename = file.md5
+    file.success_chunk = len(chunks)
     file.path = file_merge_path
     file.save()
+    cache.delete(cache_key(task_id=task_id))
     return JsonResult.success(True)
     # 第四步: 删除所有的切片, 把chunk文件夹直接删除即可
 
@@ -191,8 +193,10 @@ def create_upload_file_task(request):
             "file": file_record.to_json()
         })
     file = File(upload_filename=upload_filename, task_id=uuid.uuid4().hex, md5=md5,
-                status=0, total_chunk=total, success_chunk=0,belong=belong)
+                status=0, total_chunk=total, success_chunk=0, belong=belong)
     file.save()
+    # redis中存储
+    cache.set(cache_key(file.task_id), 0)
     # todo 是否需要创建分片规则
     return JsonResult.success({
         "file": file.to_json(),
@@ -212,3 +216,6 @@ def test(request):
         'success': True
     })
 
+
+def cache_key(task_id):
+    return "task_id:" + task_id
