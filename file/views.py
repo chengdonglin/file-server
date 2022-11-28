@@ -20,6 +20,11 @@ from util.path_utils import merge_files, get_chunk_info
 @require_http_methods(["POST"])
 @transaction.atomic()
 def file_upload(request):
+    """
+    保存分块文件
+    :param request:
+    :return:
+    """
     params = request.POST
     filename = params['filename']
     chunk_number = int(params['chunk'])
