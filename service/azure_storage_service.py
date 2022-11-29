@@ -21,7 +21,7 @@ class AzureStorageService:
         self.block_blob_service.put_block(container_name, blob_name, file_bytes, block_id)
         return block_id
 
-    def get_blobk(self, block_id):
+    def get_block(self, block_id):
         """
         返回 Block
         :param block_id:

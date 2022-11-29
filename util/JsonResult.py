@@ -12,3 +12,10 @@ class JsonResult:
         result = {'code': code, 'msg': msg, 'success': False, 'data': {}}
         return JsonResponse(result)
 
+    @staticmethod
+    def failed(enum_cls):
+        result = {
+            'code': enum_cls.code,
+            'msg': enum_cls.errmsg,
+            'data': None
+        }

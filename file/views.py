@@ -1,17 +1,15 @@
 import json
-import os.path
 import uuid
 
 from django.core import serializers
 from django.db import transaction
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
-from django.conf import settings
 from django.core.cache import cache
 
 from file.models import File, FileDetail
+from service.file_upload_storage_service import FileUploadStorageService
 from util.JsonResult import JsonResult
-from util.path_utils import merge_files, get_chunk_info
 
 
 # Create your views here.
@@ -34,62 +32,26 @@ def file_upload(request):
     task_id = params['taskId']
     start = int(params['start'])
     end = int(params['end'])
+    facility_code = params['facilityCode']
     print('基本信息', filename, chunk_number, md5, size, task_id, belong)
     task = File.objects.get(task_id=task_id)
     if task is None:
         # 为空, 说明没有提交任务
         return JsonResult.fail(404, "没有提交任务之前不允许直接上传分片")
-    # todo 分布式锁
+    file_data = request.FILES.get('file')
+    file_service = FileUploadStorageService()
+    file_service.upload_file_chunk(task_id=task.task_id, facility_code=facility_code, chunk_number=chunk_number,
+                                   filename=filename, bytes=file_data.read(), start=start, end=end, chunk_size=size)
+
     file_chunk = FileDetail.objects.filter(task_id=task_id, md5=md5).first()
     file = request.FILES.get('file')
-    if not file_chunk:
-        # 不存在则保存
-        # 存储分片文件数据
-        chunk_file_name = "{}_{}".format(task_id, chunk_number)
-        chunk_info = get_chunk_info(md5, settings.FILE_BELONG.get(belong))
-        print("文件名", chunk_file_name)
-        file_path = os.path.join(chunk_info.get('chunk_path'), chunk_file_name)
-        print(file_path)
-        try:
-            with open(file=file_path, mode='ab') as fp:
-                for chunk in file.chunks():
-                    fp.write(chunk)
-                fp.close()
-        except Exception as e:
-            print("保存失败", e)
-            fp.close()
-            os.remove(file_path)
-            return JsonResponse({
-                'code': 402,
-                'msg': '上传失败',
-                'success': False
-            })
-        file_detail = FileDetail(task_id=task_id, md5=md5, status=1, chunk=chunk_number, path=file_path,
-                                 upload_filename=filename, filename=chunk_file_name, chunk_size=size, start=start,
-                                 end=end)
-        file_detail.save()
-        # 任务成功的数量+1
-        cache.incr(cache_key(task_id))
-        return JsonResponse({
-            'code': 200,
-            'msg': '上传成功',
-            'success': True,
-            'data': {
-                'path': file_path
-            }
-        })
-    else:
-        # todo 判断是否上传完成,没完成的话删除掉,重新写入
-        upload_size = os.path.getsize(file_chunk.path)
-        if upload_size != file_chunk.end - file_chunk.start | file_chunk.status != 1:
-            with(open(file_chunk.path, 'wb')) as w:
-                for chunk in file.chunks:
-                    w.write(chunk)
-                w.close()
-        return JsonResult.success({
-            'done': True,
-            'detail': file_chunk.to_json()
-        })
+    # 任务成功的数量+1
+    cache.incr(cache_key(task_id))
+    return JsonResponse({
+        'code': 200,
+        'msg': '上传成功',
+        'success': True,
+    })
 
 
 @require_http_methods(["POST"])
@@ -153,7 +115,7 @@ def merge(request):
     # 找出所有上传成功的分片
     chunks = FileDetail.objects.filter(task_id=file.task_id, status=1)
     print("缓存中的数量", cache.get(cache_key(task_id=task_id)))
-    print("分片数量",len(chunks))
+    print("分片数量", len(chunks))
     if len(chunks) != file.total_chunk or cache.get(cache_key(task_id=task_id)) != file.total_chunk:
         # 说明没有上传完成,返回未上传完成状态,同时把已经上传成功的返回回去
         # return JsonResult.success({
@@ -161,16 +123,8 @@ def merge(request):
         #     'details': chunks
         # })
         return JsonResult.fail(400, "分片未全部上传完成,无法发起合并的操作")
-    # 第一步,读取所有的文件分片文件
-    # 第二步: 组装分片成单个文件
-    merge_file_path = get_chunk_info(file.md5, settings.FILE_BELONG.get(file.belong))
-    file_merge_path = merge_files(chunks, file.md5, merge_file_path.get('file_path'))
-    # 第三步: 更新Task状态为完成
-    file.status = 1
-    file.filename = file.md5
-    file.success_chunk = len(chunks)
-    file.path = file_merge_path
-    file.save()
+    file_service = FileUploadStorageService()
+    file_service.merge_chunk(task_id=task_id)
     cache.delete(cache_key(task_id=task_id))
     return JsonResult.success(True)
     # 第四步: 删除所有的切片, 把chunk文件夹直接删除即可

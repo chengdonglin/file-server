@@ -14,6 +14,7 @@ class File(models.Model):
     path = models.CharField(max_length=256, verbose_name="文件存储路径")
     filename = models.CharField(max_length=126, verbose_name="在服务器存储的文件名称")
     belong = models.IntegerField(verbose_name="归属")
+    facility_code = models.CharField(max_length=64,verbose_name="机构编码")
 
     class Meta:
         managed = True
